@@ -64,7 +64,12 @@ ts_model = lambda feats, tgt, mode: detector(fp32(feats), tgt, mode)
 
 diffusion = instantiate_from_config(cfg.model.diffusion).to(dev)
 sampler = SpacedSampler(diffusion.betas, diffusion.parameterization, rescale_cfg=False)
-preprocess = T.Compose([T.Resize((512, 512), interpolation=T.InterpolationMode.BICUBIC), T.ToTensor()])  # same as val.py
+def letterbox(img, s=512):  # val.py squashes to 512x512, which stretches ~3:1 plates 3x vertically; keep aspect, edge-pad to square
+    w, h = img.size
+    nw, nh = max(1, round(w * s / max(w, h))), max(1, round(h * s / max(w, h)))
+    l, t = (s - nw) // 2, (s - nh) // 2
+    img = TF.pad(img.resize((nw, nh), Image.BICUBIC), [l, t, s - nw - l, s - nh - t], padding_mode='edge')
+    return TF.to_tensor(img), (l, t, nw, nh)
 gen = torch.Generator(dev)
 os.makedirs(out_dir, exist_ok=True)
 
@@ -72,14 +77,15 @@ names = natsorted(f for f in os.listdir(img_dir) if f.lower().endswith(('.png', 
 rows = []
 for n, name in enumerate(names):
     gen.manual_seed(25)  # val.py seeds once; per-image seeding makes each result reproducible on its own
-    lq = preprocess(Image.open(os.path.join(img_dir, name)).convert('RGB')).unsqueeze(0).to(dev)
+    lq, (l, t, nw, nh) = letterbox(Image.open(os.path.join(img_dir, name)).convert('RGB'))
+    lq = lq.unsqueeze(0).to(dev)
     with torch.no_grad():
         cond = cldm.prepare_condition(swinir(lq), [''])
         z, ts_results = sampler.val_sample(
             model=cldm, device=dev, steps=50, x_size=(1, 4, 64, 64), cond=cond, uncond=None, cfg_scale=1.0,
             x_T=torch.randn((1, 4, 64, 64), generator=gen, device=dev), progress=False,
             cfg=cfg, pure_cldm=cldm, ts_model=ts_model, val_prompt=[''])
-        restored = torch.clamp((cldm.vae_decode(z) + 1) / 2, 0, 1)
+        restored = torch.clamp((cldm.vae_decode(z) + 1) / 2, 0, 1)[..., t:t + nh, l:l + nw]  # drop the padding
     TF.to_pil_image(restored.squeeze().float().cpu()).save(f'{out_dir}/restored_{os.path.splitext(name)[0]}.png')
     texts = ts_results[-1]['pred_texts']
     plate = re.sub(r'[^A-Z0-9]', '', ''.join(texts).upper())  # plates are alnum; TESTR may split one plate into words

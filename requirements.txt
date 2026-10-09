@@ -1,4 +1,7 @@
-xformers==0.0.25.post1
+# torch first, from the CUDA index (sm_120 / RTX 50xx needs >=2.7 + cu128):
+#   uv pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu128
+# xformers dropped: its 0.0.25 pin forces torch 2.2 (no sm_120); terediff falls back to torch SDP attention
+natsort==8.4.0  # infer_plates.py
 omegaconf==2.3.0
 accelerate==0.28.0
 einops==0.7.0
@@ -27,3 +30,18 @@ sentencepiece==0.1.99
 
 # requirements for ram
 fairscale==0.4.4
+
+# detectron2 + testr submodules (used via PYTHONPATH, not pip-installed, so their setup.py deps aren't pulled)
+fvcore>=0.1.5,<0.1.6
+iopath>=0.1.7,<0.1.10
+yacs
+termcolor
+tabulate
+cloudpickle
+hydra-core
+pycocotools
+matplotlib
+editdistance
+rapidfuzz
+shapely
+numba

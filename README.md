@@ -28,6 +28,14 @@ Text-Aware Image Restoration with Diffusion Models</h1>
         <a href="https://huggingface.co/datasets/Min-Jaewon/Real-Text"><img src="https://img.shields.io/badge/HuggingFace-Real--Text-yellow?logo=huggingface&logoColor=yellow"></a>
 </div>
 
+## This fork: Indonesian plate restoration (plat-nomor)
+
+`infer_plates.py` runs TeReDiff on LQ-only plate crops (`val.py` needs HQ twins). Setup, the command and its
+caveats: parent repo `CLAUDE.md` step 3c; results: parent `docs/EXPERIMENTS.md` (10-09 row).
+
+- Env: torch 2.9.1+cu128 first (RTX 50xx / sm_120), then `requirements.txt`; no xformers (falls back to SDP attention).
+- Input is letterboxed (aspect kept, edge-padded to 512²) and the pad is cropped from the output, unlike `val.py`'s square resize.
+- Result so far: 0.948 → 0.950 for the Satria recognizer on restored vs raw. Helps tiny/blurry plates, changes characters on clean ones.
 
 ## 📢 News 
 - 🤗 **2026.02.23** - We additionally release **SA-Text-test** split into 3 degradation levels! 
