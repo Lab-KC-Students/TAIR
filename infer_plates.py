@@ -8,6 +8,7 @@ sys.modules['testr.adet._C'] = types.ModuleType('_C')  # skip the CUDA build; op
 
 from PIL import Image
 from natsort import natsorted
+from plate_utils import letterbox as letterbox_pil
 from omegaconf import OmegaConf
 import torchvision.transforms as T
 import torchvision.transforms.functional as TF
@@ -64,12 +65,9 @@ ts_model = lambda feats, tgt, mode: detector(fp32(feats), tgt, mode)
 
 diffusion = instantiate_from_config(cfg.model.diffusion).to(dev)
 sampler = SpacedSampler(diffusion.betas, diffusion.parameterization, rescale_cfg=False)
-def letterbox(img, s=512):  # val.py squashes to 512x512, which stretches ~3:1 plates 3x vertically; keep aspect, edge-pad to square
-    w, h = img.size
-    nw, nh = max(1, round(w * s / max(w, h))), max(1, round(h * s / max(w, h)))
-    l, t = (s - nw) // 2, (s - nh) // 2
-    img = TF.pad(img.resize((nw, nh), Image.BICUBIC), [l, t, s - nw - l, s - nh - t], padding_mode='edge')
-    return TF.to_tensor(img), (l, t, nw, nh)
+def letterbox(img, s=512):  # keep aspect, edge-pad to square; one definition with the plate training set (plate_utils.py)
+    img, box = letterbox_pil(img, s)
+    return TF.to_tensor(img), box
 gen = torch.Generator(dev)
 os.makedirs(out_dir, exist_ok=True)
 
