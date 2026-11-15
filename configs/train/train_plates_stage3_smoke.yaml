@@ -246,7 +246,9 @@ val:
   log_image_every: 500
 
 log_args:
-  log_tool: 
+  # 'wandb' = train_plates.py's local stand-in: losses + val metrics -> <exp_dir>/train_log.jsonl and stdout;
+  # nothing is sent to wandb.ai and no key is used (plain train.py would need a real wandb login)
+  log_tool: wandb
   wandb_key: 
   wandb_proj_name: 
 ## We recommend using wandb, uncomment the following lines and set the values
