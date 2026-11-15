@@ -12,6 +12,8 @@ no wandb account or key is used. Images (wandb.Image) are dropped.
         --config configs/train/train_plates_stage3_smoke.yaml --config_testr testr/configs/TESTR/TESTR_R_50_Polygon.yaml
     python3 train_plates.py --selftest          # the wandb stand-in only (no GPU, no TAIR imports)
 """
+import importlib.machinery
+import importlib.util
 import json
 import os
 import runpy
@@ -64,6 +66,9 @@ def local_wandb(exp_dir, out=print):
             out(f"[train_log] val at step {step}: " + ' '.join(f"{k.split('tot_val_')[-1]} {v:.4f}" for k, v in d.items()))
 
     w = types.ModuleType('wandb')
+    # importlib.util.find_spec('wandb') (accelerate's is_wandb_available, run when train.py imports accelerate) raises
+    # ValueError on a sys.modules entry whose __spec__ is None, which a bare ModuleType has (11-15 smoke crash)
+    w.__spec__ = importlib.machinery.ModuleSpec('wandb', None)
     w.log = log
     w.login = w.init = w.finish = w.watch = lambda *a, **k: None
     w.Image = lambda *a, **k: None
@@ -90,6 +95,17 @@ def _selftest():
     assert recs[4]['step'] == 10 and recs[4]['train_loss/total_step_loss'] == 0.5, recs[4]
     assert lines[0].startswith('[train_log] step 10 total 0.5000 diffusion 0.2000 ocr 3.0000') and 'loss_texts 1.500' in lines[0]
     assert lines[1] == '[train_log] val at step 10: psnr 21.5000 ssim 0.6100', lines
+    # installed as sys.modules['wandb'] (as below), find_spec must work: accelerate calls it on import
+    saved = sys.modules.get('wandb')
+    sys.modules['wandb'] = w
+    try:
+        spec = importlib.util.find_spec('wandb')
+        assert spec is not None and spec.name == 'wandb', spec
+    finally:
+        if saved is None:
+            del sys.modules['wandb']
+        else:
+            sys.modules['wandb'] = saved
     print('ok: train_plates self-test')
 
 
