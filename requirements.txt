@@ -22,6 +22,9 @@ torchsde==0.2.6
 bitsandbytes==0.44.1
 wandb==0.19.8
 pyiqa==0.1.13
+# pyiqa's clipiqa imports openai-clip, which does "from pkg_resources import packaging": uv venvs ship no setuptools,
+# and setuptools >= 70 dropped that name (train.py creates the clipiqa metric at start-up)
+setuptools<70
 
 # requirements for llava
 transformers==4.37.2
