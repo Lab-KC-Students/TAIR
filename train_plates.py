@@ -85,9 +85,10 @@ def local_wandb(exp_dir, out=say):
 SMOKE_MAX_GB = 48  # L40
 
 
-def summary(path, max_gb=SMOKE_MAX_GB, out=say):
+def summary(path, max_gb=SMOKE_MAX_GB, out=say, max_rows=25):
     """Read a train_log.jsonl (last run only): loss table per log step, s/step, peak GPU memory, val metrics, and the
-    smoke checks of HOW_TO_RUN.md 5g step 5. Returns (passed, reasons). Stdlib only."""
+    smoke checks of HOW_TO_RUN.md 5g step 5. Returns (passed, reasons). Stdlib only. A long run (10k steps = 200 logs)
+    prints ~20 evenly spaced rows + the last one; the checks and s/step use every row."""
     recs = [json.loads(ln) for ln in open(path) if ln.strip()]
     starts = [i for i, r in enumerate(recs) if 'run_start' in r]
     run = recs[starts[-1] + 1:] if starts else recs
@@ -104,11 +105,14 @@ def summary(path, max_gb=SMOKE_MAX_GB, out=say):
     out('| step | total | diffusion | ocr | s/step | peak GB |')
     out('|---|---|---|---|---|---|')
     sps = []
+    every = 1 if len(rows) <= max_rows else -(-len(rows) // 20)
     for i, r in enumerate(rows):
         s = None
         if i:
             s = (r['time_s'] - rows[i - 1]['time_s']) / (r['step'] - rows[i - 1]['step'])
             sps.append(s)
+        if i % every and i != len(rows) - 1:
+            continue
         out(f"| {r['step']} | {r['train_loss/total_step_loss']:.4f} | {r.get('train_loss/diffusion_loss', float('nan')):.4f} | "
             f"{r.get('train_loss/ocr_tot_loss', float('nan')):.3f} | {'–' if s is None else f'{s:.2f}'} | {r.get('peak_mem_gb')} |")
     reasons = []
@@ -165,6 +169,11 @@ def _selftest_summary():
         assert not ok and 'only 1 loss logs (last step 10)' in why[0], why  # the 11-15 copy: stopped at step 10
         write(20, 60, nan=True)
         assert not summary(p, out=quiet.append)[0]
+        write(200, 300)  # a 10k-step run at log_loss_every 50: thinned table, last step kept
+        quiet = []
+        assert summary(p, out=quiet.append) == (True, []), quiet
+        table = [s for s in quiet if s.startswith('| ') and s[2].isdigit()]
+        assert 15 <= len(table) <= 22 and table[-1].startswith('| 2000 |'), table
 
 
 def _selftest():
