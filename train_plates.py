@@ -11,6 +11,7 @@ no wandb account or key is used. Images (wandb.Image) are dropped.
     cd TAIR && PYTHONPATH=.:detectron2:testr .venv/bin/accelerate launch train_plates.py \\
         --config configs/train/train_plates_stage3_smoke.yaml --config_testr testr/configs/TESTR/TESTR_R_50_Polygon.yaml
     python3 train_plates.py --selftest          # the wandb stand-in only (no GPU, no TAIR imports)
+    python3 train_plates.py --summary model_ckpts/plates/stage3_smoke/train_log.jsonl   # losses + smoke checks, stdlib
 """
 import importlib.machinery
 import importlib.util
@@ -23,7 +24,11 @@ import types
 import typing
 
 
-def local_wandb(exp_dir, out=print):
+def say(s):
+    print(s, flush=True)  # stdout into `| tee` is block-buffered: unflushed lines are lost if the run is killed
+
+
+def local_wandb(exp_dir, out=say):
     """wandb stand-in. train.py logs {'global_step': g, ...} at the start of every batch (before g += 1), then the
     loss / val dicts after g += 1, so those belong to step g + 1 = the step just completed."""
     os.makedirs(exp_dir, exist_ok=True)
@@ -77,6 +82,91 @@ def local_wandb(exp_dir, out=print):
     return w
 
 
+SMOKE_MAX_GB = 48  # L40
+
+
+def summary(path, max_gb=SMOKE_MAX_GB, out=say):
+    """Read a train_log.jsonl (last run only): loss table per log step, s/step, peak GPU memory, val metrics, and the
+    smoke checks of HOW_TO_RUN.md 5g step 5. Returns (passed, reasons). Stdlib only."""
+    recs = [json.loads(ln) for ln in open(path) if ln.strip()]
+    starts = [i for i, r in enumerate(recs) if 'run_start' in r]
+    run = recs[starts[-1] + 1:] if starts else recs
+    by_step = {}
+    for r in run:
+        if any(k.startswith('train_loss/') for k in r):
+            by_step.setdefault(r['step'], {}).update(r)
+    rows = [by_step[s] for s in sorted(by_step) if 'train_loss/total_step_loss' in by_step[s]]
+    out(f'# {path}: run started {recs[starts[-1]]["run_start"] if starts else "?"}, {len(run)} records')
+    val = [r for r in run if any(k.startswith('sampling_val_METRIC/tot_') for k in r)]
+    for r in val:
+        out(f"val at step {r['step']}: " + ', '.join(f"{k.split('tot_val_')[-1]} {v:.3f}" for k, v in r.items()
+                                                     if k.startswith('sampling_val_METRIC/tot_')))
+    out('| step | total | diffusion | ocr | s/step | peak GB |')
+    out('|---|---|---|---|---|---|')
+    sps = []
+    for i, r in enumerate(rows):
+        s = None
+        if i:
+            s = (r['time_s'] - rows[i - 1]['time_s']) / (r['step'] - rows[i - 1]['step'])
+            sps.append(s)
+        out(f"| {r['step']} | {r['train_loss/total_step_loss']:.4f} | {r.get('train_loss/diffusion_loss', float('nan')):.4f} | "
+            f"{r.get('train_loss/ocr_tot_loss', float('nan')):.3f} | {'–' if s is None else f'{s:.2f}'} | {r.get('peak_mem_gb')} |")
+    reasons = []
+    if len(rows) < 10:
+        reasons.append(f'only {len(rows)} loss logs (last step {rows[-1]["step"] if rows else "none"}): the run stopped '
+                       'early or was still running when the log was copied')
+    vals = [v for r in rows for k, v in r.items() if k.startswith('train_loss') and isinstance(v, float)]
+    if any(v != v or v in (float('inf'), float('-inf')) for v in vals):
+        reasons.append('nan / inf in the losses')
+    if len(rows) >= 10:
+        first, last = rows[:5], rows[-5:]
+
+        def m(rs, k):
+            return sum(r.get(k, 0.0) for r in rs) / len(rs)
+        if not m(last, 'train_loss/ocr_tot_loss') < m(first, 'train_loss/ocr_tot_loss'):
+            reasons.append('OCR loss did not fall (mean of the last 5 logs >= first 5)')
+        if m(last, 'train_loss/diffusion_loss') > 1.1 * m(first, 'train_loss/diffusion_loss'):
+            reasons.append('diffusion loss climbed (last 5 > 1.1 x first 5)')
+        out(f"OCR loss first 5 -> last 5: {m(first, 'train_loss/ocr_tot_loss'):.3f} -> {m(last, 'train_loss/ocr_tot_loss'):.3f}; "
+            f"diffusion {m(first, 'train_loss/diffusion_loss'):.4f} -> {m(last, 'train_loss/diffusion_loss'):.4f}")
+    peak = max((r.get('peak_mem_gb') or 0 for r in run), default=0)
+    if peak >= max_gb:
+        reasons.append(f'peak GPU memory {peak} GB >= {max_gb} GB')
+    steady = sorted(sps[1:] or sps)  # the first interval includes the step-1 val pass
+    if steady:
+        med = steady[len(steady) // 2]
+        out(f'median {med:.2f} s/step -> 10k steps ~ {med * 1e4 / 3600:.1f} h of training (+ val passes); peak {peak} GB')
+    out('smoke: PASS' if not reasons else 'smoke: FAIL: ' + '; '.join(reasons))
+    return not reasons, reasons
+
+
+def _selftest_summary():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, 'train_log.jsonl')
+
+        def write(n, ocr0, nan=False):
+            with open(p, 'w') as f:
+                f.write(json.dumps({'run_start': 'old'}) + '\n' + json.dumps({'step': 10, 'time_s': 1,
+                                                                              'train_loss/total_step_loss': 9.9}) + '\n')
+                f.write(json.dumps({'run_start': 'new'}) + '\n')
+                f.write(json.dumps({'step': 1, 'time_s': 60, 'sampling_val_METRIC/tot_val_psnr': 19.0}) + '\n')
+                for i in range(1, n + 1):
+                    ocr = float('nan') if nan and i == n else ocr0 - i
+                    for k, v in (('train_loss/diffusion_loss', 0.2), ('train_loss/ocr_tot_loss', ocr),
+                                 ('train_loss/total_step_loss', 0.2 + 0.05 * ocr)):
+                        f.write(json.dumps({'step': 10 * i, 'time_s': 60 + 20 * i, 'peak_mem_gb': 28.8, k: v}) + '\n')
+        quiet = []
+        write(20, 60)
+        assert summary(p, out=quiet.append) == (True, []), quiet
+        assert any('2.00 s/step' in s for s in quiet), quiet
+        write(1, 60)
+        ok, why = summary(p, out=quiet.append)
+        assert not ok and 'only 1 loss logs (last step 10)' in why[0], why  # the 11-15 copy: stopped at step 10
+        write(20, 60, nan=True)
+        assert not summary(p, out=quiet.append)[0]
+
+
 def _selftest():
     import tempfile
     lines = []
@@ -112,7 +202,11 @@ def _selftest():
 if __name__ == '__main__':
     if '--selftest' in sys.argv:
         _selftest()
+        _selftest_summary()
+        print('ok: train_plates summary self-test')
         sys.exit()
+    if '--summary' in sys.argv:
+        sys.exit(0 if summary(sys.argv[sys.argv.index('--summary') + 1])[0] else 1)
     import torch
     from omegaconf import OmegaConf
 
