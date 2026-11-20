@@ -1,6 +1,8 @@
 # TeReDiff inference on LQ-only images (val.py needs an HQ twin per image and computes IQA metrics; this doesn't).
-# usage (from TAIR/): PYTHONPATH=.:detectron2:testr .venv/bin/python infer_plates.py <img_dir> <out_dir> [label_file]
+# usage (from TAIR/): PYTHONPATH=.:detectron2:testr .venv/bin/python infer_plates.py <img_dir> <out_dir> [label_file] [--ckpt <pt>]
 # writes <out_dir>/restored_<name>.png and <out_dir>/predictions.csv (last-timestep TESTR text per image)
+# --ckpt: a fine-tuned checkpoint ({cldm, swinir, testr} fp32, e.g. model_ckpts/plates/stage3/*/0010000.pt), cast to fp16
+#   like the frozen merge so both arms run at the same precision; never merged or deleted. Default: the frozen release.
 import os, re, sys, csv, types, typing
 import torch
 torch.Tuple = typing.Tuple  # removed from newer torch, repo annotations still use it
@@ -22,8 +24,15 @@ from testr.adet.config import get_cfg
 msda._MSDeformAttnFunction.apply = lambda v, shapes, _lsi, loc, w, _step: msda.ms_deform_attn_core_pytorch(v, shapes, loc, w)
 
 STAGE3, MERGED = 'weights/terediff_stage3.pt', 'weights/terediff_fp16.pt'
-img_dir, out_dir = sys.argv[1], sys.argv[2]
-label_file = sys.argv[3] if len(sys.argv) > 3 else None
+argv = sys.argv[1:]
+ckpt_arg = None
+if '--ckpt' in argv:
+    i = argv.index('--ckpt')
+    ckpt_arg = argv[i + 1]
+    del argv[i:i + 2]
+    assert os.path.isfile(ckpt_arg), f'--ckpt {ckpt_arg}: no such file'
+img_dir, out_dir = argv[0], argv[1]
+label_file = argv[2] if len(argv) > 2 else None
 dev = 'cuda'
 cfg = OmegaConf.load('configs/val/val_terediff.yaml')
 cfg.exp_args.mode = 'VAL'
@@ -37,7 +46,7 @@ with torch.device('meta'):  # no RAM for the 6.7GB fp32 init; weights are assign
 swinir = instantiate_from_config(cfg.model.swinir)
 detector = TransformerDetector(tcfg)
 
-src = MERGED if os.path.exists(MERGED) else STAGE3
+src = ckpt_arg or (MERGED if os.path.exists(MERGED) else STAGE3)
 ckpt = torch.load(src, map_location='cpu', mmap=True, weights_only=False)
 print(f'loading {src}: {list(ckpt)}')
 for name, m in [('cldm', cldm), ('swinir', swinir), ('testr', detector)]:
@@ -50,7 +59,7 @@ cldm.clip.model.attn_mask = torch.empty(n, n).fill_(float('-inf')).triu_(1)  # s
 cldm.cast_dtype(torch.float16)  # unet+controlnet blocks fp16 (GroupNorm stays fp32), vae/clip fp32 -> fits 8GB
 cldm, swinir, detector = cldm.to(dev).eval(), swinir.to(dev).eval(), detector.to(dev).eval()
 del ckpt  # .to(dev) copied everything off the mmap; drop the reference so the file can actually be freed
-if src == STAGE3:
+if ckpt_arg is None and src == STAGE3:
     os.remove(STAGE3)  # 6.85GB fp32 -> free the disk before writing the ~4.3GB fp16 merge, not after
     torch.save({'cldm': cldm.state_dict(), 'swinir': swinir.state_dict(), 'testr': detector.state_dict()}, MERGED)
     print(f'saved {MERGED}, deleted {STAGE3}')
